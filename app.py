@@ -10,7 +10,7 @@ from analyzer import process_image
 
 # -------------------- Load Gemini API --------------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("AIzaSyDT9MzjRdQqud1QcekSsQPRbmFhphAppVA")
 AI_ENABLED = False
 if GEMINI_API_KEY:
     import google.generativeai as genai
