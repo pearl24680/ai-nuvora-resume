@@ -1,0 +1,6 @@
+streamlit
+Pillow
+PyMuPDF
+plotly
+python-dotenv
+google-generativeai
