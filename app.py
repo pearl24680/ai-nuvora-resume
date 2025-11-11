@@ -1,135 +1,259 @@
-import os
-import base64
-from pathlib import Path
-import fitz
 import streamlit as st
-import plotly.express as px
+import pdfplumber
+import docx
 import re
-from dotenv import load_dotenv
-from analyzer import process_image
+import matplotlib.pyplot as plt
 
-# -------------------- Load Gemini API --------------------
-load_dotenv()
-GEMINI_API_KEY = os.getenv("AIzaSyDT9MzjRdQqud1QcekSsQPRbmFhphAppVA")
-if GEMINI_API_KEY:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    AI_ENABLED = True
-else:
-    AI_ENABLED = False
-
-# -------------------- Streamlit Config --------------------
+# ---------------------------------------------------
+# PAGE CONFIGURATION
+# ---------------------------------------------------
 st.set_page_config(page_title="Nuvora AI Job Assistant", layout="wide")
 
-# -------------------- Helper Functions --------------------
-def pdf_to_jpg(pdf_path, output_folder="pdf_images", dpi=300):
-    file_paths = []
-    output_folder = Path(output_folder)
-    output_folder.mkdir(parents=True, exist_ok=True)
-    pdf_document = fitz.open(pdf_path)
-    for i, page in enumerate(pdf_document):
-        pix = page.get_pixmap(dpi=dpi)
-        out_file = output_folder / f"page_{i+1}.jpg"
-        pix.save(str(out_file))
-        file_paths.append(str(out_file))
-    pdf_document.close()
-    return file_paths
+# ---------------------------------------------------
+# CUSTOM STYLING
+# ---------------------------------------------------
+st.markdown("""
+<style>
+body { background-color: #f0f5ff; }
+div[data-testid="stSidebar"] { background-color: #cce0ff; }
+.section {
+    background:white;
+    padding:20px;
+    border-radius:12px;
+    box-shadow:0px 0px 10px rgba(0,0,0,0.1);
+    margin-bottom:20px;
+}
+.metric-box {
+    background:#edf3ff;
+    padding:15px;
+    border-radius:10px;
+    text-align:center;
+    font-weight:bold;
+}
+.user-msg {
+    background:#d9f2d9;
+    border-radius:8px;
+    padding:8px 12px;
+    margin:6px 0;
+}
+.bot-msg {
+    background:#cce0ff;
+    border-radius:8px;
+    padding:8px 12px;
+    margin:6px 0;
+}
+</style>
+""", unsafe_allow_html=True)
 
-def extract_projects(text):
-    pattern = r"(?i)(projects?|internships?|experience)\s*[:\-]?\s*(.+)"
-    matches = re.findall(pattern, text)
-    return list(set([m[1].strip() for m in matches]))
+# ---------------------------------------------------
+# TEXT EXTRACTION
+# ---------------------------------------------------
+def extract_text(uploaded_file):
+    text = ""
+    if uploaded_file.name.endswith(".pdf"):
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+    elif uploaded_file.name.endswith(".docx"):
+        doc = docx.Document(uploaded_file)
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+    return text
 
-def show_pdf(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode("utf-8")
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="400"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
+# ---------------------------------------------------
+# ANALYSIS FUNCTIONS
+# ---------------------------------------------------
+def analyze_resume(resume_text, jd_text=""):
+    resume_text = resume_text.lower()
+    jd_text = jd_text.lower() if jd_text else ""
 
-def show_dashboard(overall_score, matched, missing, suggestions=None):
-    col1, col2, col3 = st.columns([1,2,2])
-    with col1:
-        st.markdown('<div class="card" style="text-align:center;"><h3>Overall Score</h3></div>', unsafe_allow_html=True)
-        fig = px.bar(
-            x=[overall_score], y=["Resume Match"],
-            orientation="h", text=[f"{overall_score}%"],
-            color_discrete_sequence=["#2ECC71" if overall_score>=80 else "#F39C12" if overall_score>=60 else "#E74C3C"]
-        )
-        fig.update_traces(textposition="inside")
-        fig.update_layout(xaxis=dict(range=[0,100]), height=150, margin=dict(l=10,r=10,t=10,b=10), paper_bgcolor="white")
-        st.plotly_chart(fig, use_container_width=True)
-    with col2:
-        st.markdown('<div class="card"><h4>✅ Matched Skills</h4></div>', unsafe_allow_html=True)
-        for skill in matched: st.markdown(f'<span class="skill-badge">{skill}</span>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="card"><h4>⚠️ Missing Skills</h4></div>', unsafe_allow_html=True)
-        for skill in missing: st.markdown(f'<span class="missing-badge">{skill}</span>', unsafe_allow_html=True)
-    if suggestions:
-        st.markdown('<div class="card"><h4>💡 Suggestions</h4></div>', unsafe_allow_html=True)
-        for s in suggestions: st.markdown(f'<span class="suggestion-badge">{s}</span>', unsafe_allow_html=True)
+    ds_keywords = [
+        "python", "machine learning", "data analysis", "sql", "excel", "pandas",
+        "numpy", "deep learning", "statistics", "power bi", "tableau",
+        "visualization", "modeling", "ai", "communication", "teamwork",
+        "data cleaning", "eda", "nlp", "classification", "regression"
+    ]
 
-# -------------------- Sidebar --------------------
-st.sidebar.title("📘 Nuvora AI Job Assistant")
-page = st.sidebar.radio("Navigate", ["🏠 Home", "💼 Project Extractor", "🤖 Career Chatbot"])
+    found = [kw for kw in ds_keywords if kw in resume_text]
+    missing = [kw for kw in ds_keywords if kw not in found]
+    ats_score = int((len(found) / len(ds_keywords)) * 100)
 
-# -------------------- HOME PAGE --------------------
-if page=="🏠 Home":
-    st.header("📊 AI Career Dashboard")
-    if not AI_ENABLED:
-        st.warning("⚠️ AI features are disabled. Set GEMINI_API_KEY in your .env to enable resume analysis.")
-    st.subheader("📋 Job Description")
-    job_description = st.text_area("Paste the job description here", height=200)
-    st.subheader("📄 Upload Resume (PDF)")
-    uploaded_file = st.file_uploader("Upload your Resume", type=["pdf"])
-    if uploaded_file and job_description.strip() and AI_ENABLED:
-        file_path = os.path.join(os.getcwd(), uploaded_file.name)
-        with open(file_path, "wb") as f: f.write(uploaded_file.getbuffer())
-        if st.button("🔍 Analyze Resume"):
-            images = pdf_to_jpg(file_path)
-            extracted_texts = [process_image(img, "Extract text from resume", type="image") for img in images]
-            prompt = f"""
-            Analyze resume text vs job description: {job_description}
-            Resume Text: {extracted_texts}
-            Return JSON: overall_score, keyword_matching, missing_keywords, suggestions
-            """
-            final_result = process_image(file_path=extracted_texts, prompt=prompt, type="text")
-            show_dashboard(final_result.get("overall_score",0),
-                           final_result.get("keyword_matching",[]),
-                           final_result.get("missing_keywords",[]),
-                           final_result.get("suggestions",[]))
+    jd_keywords = []
+    if jd_text:
+        jd_keywords = list(set(re.findall(r'\b[a-zA-Z]{4,}\b', jd_text)))
 
-# -------------------- PROJECT EXTRACTOR --------------------
-elif page=="💼 Project Extractor":
-    st.title("💼 Resume Project Extractor")
-    uploaded_file = st.file_uploader("Upload your Resume (PDF)", type=["pdf"])
-    if uploaded_file:
-        file_path = os.path.join(os.getcwd(), uploaded_file.name)
-        with open(file_path, "wb") as f: f.write(uploaded_file.getbuffer())
-        show_pdf(file_path)
-        if st.button("📂 Extract Projects"):
-            images = pdf_to_jpg(file_path)
-            full_text = ""
-            for img in images:
-                full_text += str(process_image(img, "Extract plain text", "image"))
-            projects = extract_projects(full_text)
-            if projects:
-                st.success(f"✅ Found {len(projects)} projects:")
-                for p in projects: st.markdown(f"🔹 **{p}**")
+    return ats_score, found, missing, jd_keywords
+
+def extract_projects(resume_text):
+    project_patterns = [
+        r'(?i)(projects?|academic projects?|personal projects?|internship projects?)[:\-]?\s*(.*)',
+        r'(?i)(?:\*\*|##|###)?\s*Project\s*[:\-]?\s*(.*)'
+    ]
+    matches = []
+    for pattern in project_patterns:
+        found = re.findall(pattern, resume_text)
+        for f in found:
+            if isinstance(f, tuple):
+                matches.append(f[1])
             else:
-                st.warning("No clear projects found.")
+                matches.append(f)
+    return list(set(matches))
 
-# -------------------- CAREER CHATBOT --------------------
-elif page=="🤖 Career Chatbot":
-    st.title("🤖 AI Career Chat Assistant")
-    if "chat_history" not in st.session_state: st.session_state.chat_history=[]
-    user_input = st.text_input("You:", key="user_input")
-    if user_input and AI_ENABLED:
-        model = genai.GenerativeModel("gemini-1.5-flash-002")
-        history = "\n".join([f"User: {h['user']}\nBot: {h['bot']}" for h in st.session_state.chat_history])
-        prompt = f"You are a career coach AI.\nHistory:\n{history}\nUser query: {user_input}"
-        response = model.generate_content(prompt)
-        reply = response.candidates[0].content.parts[0].text if hasattr(response,"candidates") else "Sorry, I couldn’t process that."
-        st.session_state.chat_history.append({"user": user_input, "bot": reply})
-    for chat in st.session_state.chat_history[::-1]:
-        st.markdown(f"👩‍💼 You: {chat['user']}")
-        st.markdown(f"🤖 {chat['bot']}")
+def plot_ats(ats_score):
+    fig, ax = plt.subplots(figsize=(3, 3))
+    ax.barh(["ATS Match"], [ats_score], color="#6a9efc")
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Score (%)")
+    for i, v in enumerate([ats_score]):
+        ax.text(v + 2, i, f"{v}%", va='center', fontweight='bold')
+    return fig
+
+# ---------------------------------------------------
+# SIDEBAR NAVIGATION
+# ---------------------------------------------------
+st.sidebar.title("🧭 Navigation")
+menu = ["🏠 Dashboard", "📊 ATS Analysis", "💼 Project Extraction", "🤖 AI Career Chat"]
+choice = st.sidebar.radio("Go to:", menu)
+
+# ---------------------------------------------------
+# FILE UPLOAD (GLOBAL)
+# ---------------------------------------------------
+st.sidebar.subheader("📂 Upload Files")
+resume_file = st.sidebar.file_uploader("Upload Resume", type=["pdf", "docx"])
+jd_file = st.sidebar.file_uploader("Upload Job Description (optional)", type=["pdf", "docx", "txt"])
+
+resume_text, jd_text = "", ""
+if resume_file:
+    resume_text = extract_text(resume_file)
+if jd_file:
+    if jd_file.name.endswith(".txt"):
+        jd_text = jd_file.read().decode("utf-8")
+    else:
+        jd_text = extract_text(jd_file)
+
+# ---------------------------------------------------
+# 1️⃣ DASHBOARD
+# ---------------------------------------------------
+if choice == "🏠 Dashboard":
+    st.title("💎 Nuvora AI Job Assistant Dashboard")
+
+    if resume_file:
+        ats_score, found, missing, jd_keywords = analyze_resume(resume_text, jd_text)
+        projects = extract_projects(resume_text)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(f"<div class='metric-box'>📊 ATS Score<br><span style='font-size:28px;color:#004080'>{ats_score}%</span></div>", unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"<div class='metric-box'>✅ Matched Keywords<br><span style='font-size:28px;color:#008000'>{len(found)}</span></div>", unsafe_allow_html=True)
+        with col3:
+            st.markdown(f"<div class='metric-box'>⚠️ Missing Keywords<br><span style='font-size:28px;color:#ff3300'>{len(missing)}</span></div>", unsafe_allow_html=True)
+
+        st.markdown("### 📈 Resume Selection Probability")
+        st.pyplot(plot_ats(ats_score))
+
+        st.markdown("<div class='section'>", unsafe_allow_html=True)
+        st.subheader("✅ Matched Keywords")
+        st.write(", ".join(found) if found else "No keywords found.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section'>", unsafe_allow_html=True)
+        st.subheader("⚠️ Missing Keywords")
+        st.write(", ".join(missing) if missing else "None 🎉 Perfect coverage!")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if jd_keywords:
+            st.markdown("<div class='section'>", unsafe_allow_html=True)
+            st.subheader("📋 Job Description Keywords")
+            st.write(", ".join(jd_keywords[:40]) + " ...")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section'>", unsafe_allow_html=True)
+        st.subheader("💼 Detected Projects")
+        if projects:
+            for i, p in enumerate(projects, 1):
+                st.write(f"**{i}.** {p.strip()}")
+        else:
+            st.write("No projects detected.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section'>", unsafe_allow_html=True)
+        st.subheader("🧠 Resume Improvement Suggestions")
+        st.markdown("""
+        - Add missing **data tools or libraries** from the list above.  
+        - Use **metrics or outcomes** in your project descriptions.  
+        - Mirror **JD language** to improve ATS match.  
+        - Keep your resume concise & skills highlighted clearly.
+        """)
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info("👆 Upload your resume from the sidebar to generate your dashboard.")
+
+# ---------------------------------------------------
+# 2️⃣ ATS ANALYSIS PAGE
+# ---------------------------------------------------
+elif choice == "📊 ATS Analysis":
+    st.title("📊 Detailed ATS Resume Analysis")
+
+    if resume_file:
+        ats_score, found, missing, jd_keywords = analyze_resume(resume_text, jd_text)
+        st.metric("ATS Score", f"{ats_score}%")
+        st.pyplot(plot_ats(ats_score))
+        st.write("**Matched Keywords:**", ", ".join(found))
+        st.write("**Missing Keywords:**", ", ".join(missing))
+    else:
+        st.warning("Please upload your resume to analyze.")
+
+# ---------------------------------------------------
+# 3️⃣ PROJECT EXTRACTION PAGE
+# ---------------------------------------------------
+elif choice == "💼 Project Extraction":
+    st.title("💼 Resume Project Extraction")
+
+    if resume_file:
+        projects = extract_projects(resume_text)
+        if projects:
+            for i, p in enumerate(projects, 1):
+                st.write(f"**{i}.** {p.strip()}")
+        else:
+            st.warning("No projects detected in resume.")
+    else:
+        st.info("Upload your resume to extract projects.")
+
+# ---------------------------------------------------
+# 4️⃣ AI CAREER CHATBOT
+# ---------------------------------------------------
+elif choice == "🤖 AI Career Chat":
+    st.title("🤖 Nuvora AI Career Assistant")
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    user_input = st.text_input("💬 Ask about resume, jobs, or data science careers:")
+    if st.button("Send") and user_input.strip():
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        text_lower = user_input.lower()
+
+        # Smart responses
+        if "resume" in text_lower:
+            response = "Ensure your resume highlights core skills, tools, and measurable impact."
+        elif "ats" in text_lower:
+            response = "ATS prefers clear formatting & keyword alignment with the job description."
+        elif "data" in text_lower:
+            response = "Include data cleaning, EDA, visualization, and model-building experience."
+        elif "python" in text_lower:
+            response = "Python is key for data roles—mention pandas, numpy, scikit-learn, etc."
+        elif "sql" in text_lower:
+            response = "Add SQL queries or database projects to strengthen your profile."
+        elif "job" in text_lower:
+            response = "Target roles like Data Analyst, ML Engineer, or AI Associate matching your resume."
+        else:
+            response = "That's great! I can guide you about ATS, resume structure, or data science careers."
+
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+    for chat in st.session_state.chat_history:
+        if chat["role"] == "user":
+            st.markdown(f'<div class="user-msg">{chat["content"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="bot-msg">{chat["content"]}</div>', unsafe_allow_html=True)
